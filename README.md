@@ -9,3 +9,12 @@ Talerliste:
 - Jesper (Navet script)
 - Jakob (Vim/Neovim bare kanskje!)
 - Jonathan (statistikk, matte greier)
+
+Ansvarlig for innkøp:
+- ...
+
+Ansvarlig for promo:
+- Amadu?
+
+Ansvarlig for opprigg:
+- ...
