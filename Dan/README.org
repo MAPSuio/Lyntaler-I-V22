@@ -1,0 +1,302 @@
+* Lyntaler 03.03.2022
+
+  Har lagt dette ut på github: https://github.com/danbanan/lyntaler-2022-03-03 (privat for øyeblikket)
+
+** Hva jeg skal vise dere i dag: grunnleggende Clang og libtooling
+
+   Jeg skal vise dere i dag hvordan vi kan bruke Clang og Clang sin infrastruktur til å utvikle
+   språklige verktøy for programmeringsspråk i C-familien.
+   
+   - *I C-familien finner vi:*
+     - C :: IN2140, OS (IN4000), Nettverk (IN4230)
+     - C++ :: Kompilatorer, nettverkslesere, High-Frequency Trading (HFT), når du trenger /speed/.
+     - CUDA :: Programmeringsspråk for NVIDIA GPUer (IN5050 ftw!)
+     - Objective C/C++ :: Hovedprogrammeringsspråket for OSX- og IOS-utvikling (før Swift)
+     - OpenCL (Open Computing Language) :: Rammeverk for å skrive programmer som kan kjøre på
+       tvers av maskinvaplatformer bestående av heterogene akseleratorer som CPU, GPU, FPGA,
+       DSP osv.  /Veldig populært blant HPCs (High Performance Computers)./
+
+** Hva er Clang?
+
+   Clang er en kompilator "front end" for programmeringsspråk i C-familien, og som også kommer
+   med en infrastruktur for utvikling av språklige verktøy for nevnte programmeringsspråk.
+
+** Men sånn helt seriøst, hva er Clang? ... men først litt kompilatorteori
+   
+*** Front end (fire faser)
+    - Preprossesering :: makro substitusjon (f.eks. i C og C++) og "conditional compiling"
+      (kompilering basert på system Linux/Windows)
+
+    - Leksikalsk analyse (lexing/tokenization) :: bryte opp kildekoden til leksikalske symboler
+      (ofte delt opp i /scanning/ og /evaluating/)
+
+    - Syntaktisk analyse (parsing) :: parsere sekvensen av de leksikalske symbolene for å
+      identifisere strukturen i programmet.  Resultatet er ofte et parseringstre (Parse tree).
+
+    - Semantisk analyse :: tillegg av semantisk informasjon til parseringstreet og oppbyggning
+      av et symbolsk tabell.  Denne fasen innebærer blant annet typesjekking, binding av objekter
+      (assosiere variabler med objekt- og funksjonsdefinisjoner), sjekke at alle variabler er
+      initialisert før bruk (definite assignment) og avvise programmer som ikke overholder
+      semantiske regler.  Resultatet er et abstrakt syntakstre (AST).
+      
+*** Middle end (to faser)
+    - Analyse :: essensiell analyse av /intermediate representation/ (IR) generert av frontend-en,
+      som blir viktig informasjon for optimaliseringsfasen
+
+    - Optimalisering :: optimalisering av IR som /inlining/, /loop unrolling/, /dead code
+      elimination/ osv.
+
+*** Back end (to faser)
+    - Maskinavhenging optimaliseringer :: optimaliseringer som er CPU arkitektur spesifikke
+
+    - Maskinkode generering :: transformasjon av IR til maskinkoden tilhørende maskinen
+      kompilatoren kjører på
+
+** Sum sumarum
+
+   *Clang er en kompilator-/frontend/ for C-familien.*
+
+   Clang er en del av LLVM projektet og genererer LLVM IR (intermediate representation).
+   Dette videreføres til en LLVM /back end/ som generer maskinkode.
+
+** Introduserende eksempel: enkel if-setning
+
+   Nå skal vi se på hvordan vi kan bruke Clang til å finne ut elementære ting om koden vår.
+
+   Gitt følgende kode skal vi med Clang si hvor i koden vi finner if-setninger ikke har en
+   else-gren.  Vi skal matche kun på der det står if og ikke else-if.
+
+   Før vi hopper inn bør vi ta en titt på det abstrakte syntakstreet (AST) til koden vi gjør analyse
+   på:
+
+   #+begin_src bash
+   clang -Xclang -ast-dump -fsyntax-only ../test/test.cpp
+   #+end_src
+
+** Klarer dere å se distinksjonen mellom en ~if/else~-setning og en ~else if~-setning?
+
+*** Ja/Nei
+
+    Det finnes ingen =else-if= grener i AST-et.  Vi har kun if (ingen else gren), =if/else= (tom
+    =else=-gren) og =if= med en =if= i =else=-grenen (else =if= med andre ord).
+   
+*** Kildekode vi skal gjøre analyse på
+
+    #+begin_src cpp
+      void function(int x) {
+	if (x > 1) { // find this
+	}
+
+	if (x > 1) { // not this
+	} else {
+	}
+
+	if (x > 1) { // find this
+	} else if (x < 2) { // and not this, etc.
+	}
+
+	if (x > 1) { // find this
+	} else if (x < 2) { // and not this, etc.
+	} else if (x > 2) { // and not this, etc.
+	}
+
+	if (x) { // find this
+	  if (x == 1) { // find this
+
+	  }
+	}
+
+	if (x) // find this
+	  if (x == 1) // find this
+	    (void) x;
+
+	if (x) // not this
+	  (void) x;
+	else
+	  (void) x;
+
+	return;
+      }
+    #+end_src
+
+    Vi skal altså finne matche på linje *2*, *9*, *13*, *18*, *19*, *24*, *25*.
+    
+** Livekoding!
+  
+*** Recursive AST Visitor
+
+    Recursive AST Visitor lar deg traversere AST-et på en dybde-først måte.  Den besøker alle
+    nodene der hvor man har implementert =Visit*=-metoden.
+
+    Denne teknikken krever tre klasser: =ASTFrontendAction=, =ASTConsumer= og =RecursiveASTVisitor<>=.
+    
+**** Løsningsforslag!
+
+     #+begin_src cpp
+       class SingleIfVisitor : public RecursiveASTVisitor<SingleIfVisitor> {
+	public:
+	 explicit SingleIfVisitor( ASTContext *Context ) : Context( Context ) {}
+
+	 bool VisitIfStmt( IfStmt *is ) {
+    
+	   if (is->hasElseStorage()) {
+	     Stmt *else_stmt = is->getElse();
+	     if (isa<IfStmt>(else_stmt)) { // else if statement
+	       elseifs.push_back( cast<IfStmt>( else_stmt ) );
+	     } else {
+	       return true;  // skip
+	     }
+	   }
+
+	   for ( IfStmt *I : elseifs ) {
+	     if (I == is) {
+	       return true;  // skip
+	     }
+	   }
+    
+	   FullSourceLoc fullLocation = Context->getFullLoc( is->getBeginLoc() );
+
+	   stringstream ss;
+
+	   if ( fullLocation.isValid() ) {
+	     llvm::outs() << ":" << fullLocation.getSpellingLineNumber()
+		<< ":" << fullLocation.getSpellingColumnNumber()
+		<< ": note: \"single_if\" binds here\n";
+	   }
+
+	   return true;
+	 }
+
+	private:
+	 vector<IfStmt *> elseifs;
+	 ASTContext *Context;
+       };
+     #+end_src
+
+*** AST Matcher
+
+    AST Matcher gir deg et domene-spesifikt språk (DSL) med predikater som matcher på noder i
+    Clang sitt AST.
+
+    Referanse finner dere her.
+
+    Denne teknikken krever kun en CallBack klasse.
+    
+**** Eksempel 1: match alle ~if~-setninger
+
+     #+begin_src cpp
+     ifStmt()
+     #+end_src
+
+**** Eksempel 2: match alle ~if~-setninger som ikke har en ~else~-gren
+
+     #+begin_src cpp
+     unless(hasElse(anything()))
+     #+end_src
+     
+**** Eksempel 3: match alle ~if~-setninger som ikke har en ~else~-gren, med mindre else-grenen har en ~if~
+
+     #+begin_src cpp
+     ifStmt(unless(hasElse(unless(ifStmt()))))
+     #+end_src
+     
+**** Eksempel 4: match alle ~if~-setninger hvor forelderen ikke er en ~if~-setning med en ~else~-gren
+
+     #+begin_src cpp
+     ifStmt(unless(hasParent(ifStmt(hasElse(anything())))))
+     #+end_src
+
+**** Har dere fulgt med?
+
+     Hvorfor vil ikke dette fungere?
+     
+     #+begin_src cpp
+     ifStmt(allOf(unless(hasElse(anything())),
+                    unless(hasParent(ifStmt(hasElse(anything()))))))
+     #+end_src
+     
+**** Siste: slå sammen 3 og 4
+
+     #+begin_src cpp
+       ifStmt(allOf(unless(hasElse(unless(ifStmt()))),
+                    unless(hasParent(ifStmt(hasElse(anything()))))))
+     #+end_src
+
+     Prøv selv enkelt med clang-query:
+
+     #+begin_src bash
+     clang-query-10 -c "m ifStmt(allOf(unless(hasElse(unless(ifStmt()))),
+     unless(hasParent(ifStmt(hasElse(anything()))))))" ../test/test.cpp 
+     #+end_src
+     
+** La oss kjøre koden
+
+** Bygg og kjør selv!
+
+   - *Programvare:*
+     - Cmake 3.5 (or higher)
+     - Clang 10			
+     - Linux (Ubuntu 20.04)
+
+   Lag en mappe for byggfilene deres:
+
+   #+begin_src bash
+   mkdir <project-root>/build
+   #+end_src
+
+   Kjør CMAKE for å generere Makefile og compile_commands.json fil for LSP-server:
+
+   #+begin_src bash
+   cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -I ./build/
+   #+end_src
+
+   Symlink compile_commands.json filen til der hvor du har kildefilene:
+
+   #+begin_src bash
+   ln -s ./build/compile_commands.json ./src/compile_commands.json
+   #+end_src
+
+   Gå til byggemappen deres og kompiler analyseverktøyet med =make=:
+
+   #+begin_src bash
+   cd ./build/ && make
+   #+end_src
+
+   Kjør koden:
+
+   #+begin_src bash
+   ./ifelse ../test/test.cpp
+   #+end_src
+
+*** Installere programvare (hvis du allerede ikke har gjort det!)
+
+    Oppdater Ubuntu:
+    
+    #+begin_src bash
+      sudu apt update -y && apt upgrade -y
+    #+end_src
+
+    Installer =cmake=:
+    
+    #+begin_src bash
+    sudo apt install -y cmake cmake-curses-gui python3 wget gnupg git python3-pip python3-pytest python3-pytest-cov
+    #+end_src
+
+    Installer =python3= avhengigheter for =lit=:
+
+    #+begin_src bash
+    sudo apt install -y python3 wget gnupg git python3-pip python3-pytest python3-pytest-cov
+    #+end_src
+
+    Installer Clang og LLVM:
+
+    #+begin_src bash
+    sudo wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key| apt-key add - && apt-get install -y libllvm-10-ocaml-dev libllvm10 llvm-10 llvm-10-dev llvm-10-doc llvm-10-examples llvm-10-runtime clang-10 clang-tools-10 clang-10-doc libclang-common-10-dev libclang-10-dev libclang1-10 clang-format-10 python3-clang-10 clangd-10 clang-tidy-10
+    #+end_src
+
+    Sett versjon 10 som hovedversjon med symlink:
+
+    #+begin_src bash
+    sudo ln -s /usr/bin/clang-10 /usr/bin/clang && ln -s /usr/bin/clang++-10 /usr/bin/clang++ && ln -s /usr/lib/llvm-10/build/utils/lit/lit.py /usr/bin/lit && ln -s /usr/bin/opt-10 /usr/bin/opt && ln -s /usr/bin/FileCheck-10 /usr/bin/FileCheck
+    #+end_src
+    
